@@ -1,0 +1,9 @@
+# Default owner for everything in this org-config repo.
+* @simba-beannbean
+
+# Reusable workflows and CI config — same owner, but called out explicitly
+# so changes to org-wide CI always require explicit review.
+.github/workflows/** @simba-beannbean
+dependabot.yml       @simba-beannbean
+SECURITY.md          @simba-beannbean
+RUNBOOK.md           @simba-beannbean

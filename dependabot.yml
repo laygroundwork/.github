@@ -1,0 +1,51 @@
+# Org-wide Dependabot template.
+#
+# GitHub does NOT support a single org-level Dependabot config — each repo must
+# carry its own `.github/dependabot.yml`. Copy this file into each laygroundwork
+# repo at `.github/dependabot.yml` and adjust the package-ecosystem block if the
+# repo uses a different stack (pip, go, docker, etc.).
+#
+# Conventions:
+#   - Weekly updates.
+#   - Patch updates auto-merge after CI passes (handled by branch-protection
+#     auto-merge rules — see P2-1 in infra/PLATFORM_PLAN.md).
+#   - Minor/major updates require human review.
+#   - GitHub Actions ecosystem is included so SHA-pinned action versions get
+#     bumped by Dependabot PRs (it understands the `# v6.0.2` trailing comment).
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

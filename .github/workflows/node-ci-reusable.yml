@@ -103,13 +103,42 @@ jobs:
   secret-scan:
     name: secret scan (gitleaks)
     runs-on: ubuntu-latest
+    # We invoke the gitleaks OSS binary directly instead of using
+    # gitleaks/gitleaks-action. The action v2+ requires a paid license
+    # for any organization-owned repo (the OSS binary itself remains
+    # free). Pinning the binary's release tag + verifying its sha256
+    # against the published checksums file gives us the same supply-
+    # chain guarantee as a SHA-pinned action, without the licensing
+    # entanglement. Bump GITLEAKS_VERSION / _SHA256 together when a new
+    # release is needed; the sha line lives at
+    # https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_checksums.txt
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
+      - name: Install gitleaks binary (sha256-verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o gitleaks.tar.gz "$URL"
+          ACTUAL=$(sha256sum gitleaks.tar.gz | awk '{print $1}')
+          if [ "$ACTUAL" != "$GITLEAKS_SHA256" ]; then
+            echo "gitleaks tarball sha256 mismatch:"
+            echo "  expected: $GITLEAKS_SHA256"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
+          tar xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gitleaks detect --source . --no-banner --redact --exit-code 1 --verbose

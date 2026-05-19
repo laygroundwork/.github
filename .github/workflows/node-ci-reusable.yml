@@ -5,8 +5,12 @@
 # on "how do we build + test + scan one repo / one workspace." When
 # input count exceeds ~8, or `if: inputs.lang == 'X'` appears in more
 # than 2 steps, split into `node-ci-reusable` + `shell-ci-reusable`
-# sharing a `secret-scan-reusable`. This is the canary — do not let it
-# grow past those limits without explicitly revisiting the split.
+# sharing a `secret-scan-reusable`.
+#
+# TRIPWIRE STATUS (as of v1.1): FIRED. 8 inputs and 6 `lang == 'node'`
+# steps + 2 `lang == 'shell'` steps (8 total `lang`-gated steps). The
+# split is tracked in https://linear.app/laygroundwork/issue/GW-292 —
+# do not let the file grow further without doing the split.
 #
 # ─── Filename history ───────────────────────────────────────────────────
 # Filename `node-ci-reusable.yml` is a historical artifact (matches the
@@ -25,8 +29,10 @@
 #   - `ci / build-test (ubuntu-latest)`
 #   - `ci / build-test (macos-latest)`  (only when run-on-macos: true)
 #   - `ci / secret-scan`
-# When you change job IDs, update PLATFORM_PLAN.md §7 in the same PR
-# cycle — GW-156 P2-1's branch-protection apply script reads from
+# Branch-protection rules require the *display name* (job ID + matrix
+# value), not the bare job ID. When you change EITHER the job IDs OR
+# the `name:` field on a job, update PLATFORM_PLAN.md §7 in the same
+# PR cycle — GW-156 P2-1's branch-protection apply script reads from
 # there.
 #
 # ─── Permissions ────────────────────────────────────────────────────────
@@ -77,10 +83,6 @@ on:
         description: "Path (relative to repo root) where package.json lives. Default '.' for single-app repos; set to e.g. 'apps/mcp' for monorepo workspaces. Applied to npm ci/build/test/lint, artifact upload path, and node-version-file resolution. Secret-scan still runs from repo root regardless."
         type: string
         default: "."
-      package-manager:
-        description: "Reserved. Only 'npm' is wired in v1.1; pnpm / yarn support lands when the monorepo (P3a) needs it."
-        type: string
-        default: "npm"
       install-ignore-scripts:
         description: "Pass --ignore-scripts to npm ci. Blocks dependency lifecycle hooks (preinstall, postinstall, prepare) from running during install — defense-in-depth against fork-PR RCE via a malicious dep's lifecycle script. Default false because some legitimate deps (esbuild, inngest-cli, protobufjs) use postinstall to download binaries or build native bindings. Opt in for repos whose deps don't depend on lifecycle hooks; revisit per-caller as the dep graph evolves."
         type: boolean
@@ -109,7 +111,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Hard-cap caller-supplied timeout-minutes at 30. Default is 15 (set
     # at the input level); the cap lives here so a caller can't ask for
-    # 360. Ternary returns capped value or 30.
+    # 360. Edge case: timeout-minutes: 0 also returns 30 because 0 is
+    # falsy in GH Actions expressions and trips the `||` fallback. A
+    # caller asking for 0 has a config bug, not a use case, so silent
+    # promotion to 30 is acceptable.
     timeout-minutes: ${{ inputs.timeout-minutes <= 30 && inputs.timeout-minutes || 30 }}
     steps:
       - name: Checkout
@@ -171,8 +176,23 @@ jobs:
       - name: Run shellcheck on tracked *.sh files
         if: inputs.lang == 'shell'
         shell: bash
+        env:
+          # Pass via env to avoid interpolating arbitrary caller-supplied
+          # strings directly into the shell command — defense against a
+          # caller (deliberately or accidentally) setting
+          # shellcheck-severity to a shell-injecting value. Allowlist
+          # validation below is the actual guard; env-indirection is
+          # belt-and-suspenders.
+          SHELLCHECK_SEVERITY: ${{ inputs.shellcheck-severity }}
         run: |
           set -euo pipefail
+          case "$SHELLCHECK_SEVERITY" in
+            error|warning|info|style) ;;
+            *)
+              echo "Invalid shellcheck-severity: '$SHELLCHECK_SEVERITY'. Expected one of: error, warning, info, style."
+              exit 2
+              ;;
+          esac
           # `git ls-files` respects .gitignore + submodule boundaries
           # automatically, avoiding find-traversal-into-node_modules /
           # vendored-deps and dropping the need for find -prune.
@@ -181,9 +201,9 @@ jobs:
             echo "lang: shell requires at least one tracked *.sh file; none found."
             exit 1
           fi
-          echo "Linting ${#FILES[@]} file(s) with --severity=${{ inputs.shellcheck-severity }}:"
+          echo "Linting ${#FILES[@]} file(s) with --severity=$SHELLCHECK_SEVERITY:"
           printf '  %s\n' "${FILES[@]}"
-          shellcheck --severity="${{ inputs.shellcheck-severity }}" "${FILES[@]}"
+          shellcheck --severity="$SHELLCHECK_SEVERITY" "${FILES[@]}"
 
   secret-scan:
     name: secret-scan

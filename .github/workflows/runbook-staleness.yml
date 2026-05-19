@@ -1,0 +1,56 @@
+name: RUNBOOK staleness check
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse Last reviewed date
+        id: parse
+        run: |
+          set -euo pipefail
+          line=$(grep -E '^\*\*Last reviewed:\*\*' RUNBOOK.md || true)
+          if [ -z "$line" ]; then
+            echo "::error::RUNBOOK.md is missing a '**Last reviewed:** YYYY-MM-DD' line"
+            exit 1
+          fi
+          last=$(echo "$line" | sed -E 's/^\*\*Last reviewed:\*\*[[:space:]]*//' | awk '{print $1}')
+          today=$(date -u +%Y-%m-%d)
+          age=$(( ( $(date -u -d "$today" +%s) - $(date -u -d "$last" +%s) ) / 86400 ))
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+          echo "age=$age" >> "$GITHUB_OUTPUT"
+          if [ "$age" -gt 100 ]; then echo "stale=true" >> "$GITHUB_OUTPUT"; else echo "stale=false" >> "$GITHUB_OUTPUT"; fi
+          echo "RUNBOOK last reviewed: $last (age: $age days)"
+
+      - name: Open staleness issue if stale
+        if: steps.parse.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LAST: ${{ steps.parse.outputs.last }}
+          AGE: ${{ steps.parse.outputs.age }}
+        run: |
+          set -euo pipefail
+          title="RUNBOOK.md quarterly review overdue (${AGE} days since ${LAST})"
+          existing=$(gh issue list --search "RUNBOOK.md quarterly review overdue" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Open staleness issue #${existing} already exists; skipping."
+            exit 0
+          fi
+          gh issue create --title "$title" --body "$(cat <<EOF
+          RUNBOOK.md was last reviewed on **${LAST}** (${AGE} days ago).
+
+          Quarterly cadence (90 days) plus a 10-day grace window were both exceeded. Refresh the doc and bump the \`**Last reviewed:**\` line at the top, then close this issue.
+
+          _Filed by \`.github/workflows/runbook-staleness.yml\`. Closes acceptance item **A0.6** from GW-150._
+          EOF
+          )"

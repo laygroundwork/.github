@@ -1,14 +1,57 @@
-# Reusable CI workflow consumed by every laygroundwork repo's
-# `.github/workflows/ci.yml`. Filename is `node-ci-reusable.yml` for
-# historical reasons (matches PLATFORM_PLAN.md §5 tree); the workflow
-# now handles both Node and shell-only repos.
+# Reusable CI workflow for laygroundwork repos.
 #
-# Job naming is preserved across `lang` modes so PLATFORM_PLAN.md §7's
-# branch-protection snippet (which requires `ci / build-test` and
-# `ci / secret-scan`) keeps working regardless of the consumer's lang.
-# A shell-only repo runs shellcheck inside the `build-test` job rather
-# than emitting a separately-named check — same status name, same
-# branch-protection contract.
+# ─── Charter ────────────────────────────────────────────────────────────
+# One workflow, multiple langs, shared secret-scan. Inputs stay focused
+# on "how do we build + test + scan one repo / one workspace." When
+# input count exceeds ~8, or `if: inputs.lang == 'X'` appears in more
+# than 2 steps, split into `node-ci-reusable` + `shell-ci-reusable`
+# sharing a `secret-scan-reusable`. This is the canary — do not let it
+# grow past those limits without explicitly revisiting the split.
+#
+# ─── Filename history ───────────────────────────────────────────────────
+# Filename `node-ci-reusable.yml` is a historical artifact (matches the
+# PLATFORM_PLAN.md §5 tree). The workflow now handles Node and
+# shell-only repos via the `lang` input.
+#
+# ─── Versioning ─────────────────────────────────────────────────────────
+# Callers MUST pin to a tag (e.g. `@v1`), not `@main`. `@main` is a
+# blast-radius footgun: a bad merge here instantly breaks every caller.
+# Tags are cut from main after CODEOWNERS-required review on this file.
+#
+# ─── Branch-protection contract ─────────────────────────────────────────
+# Job IDs `build-test` and `secret-scan` are stable. GitHub Actions
+# appends the matrix value to the display name, so the names required
+# in branch protection are:
+#   - `ci / build-test (ubuntu-latest)`
+#   - `ci / build-test (macos-latest)`  (only when run-on-macos: true)
+#   - `ci / secret-scan`
+# When you change job IDs, update PLATFORM_PLAN.md §7 in the same PR
+# cycle — GW-156 P2-1's branch-protection apply script reads from
+# there.
+#
+# ─── Permissions ────────────────────────────────────────────────────────
+# Permissions are declared at JOB level (not workflow level). Workflow-
+# level permissions in a reusable become a CEILING for callers — moving
+# them down to job level keeps them a FLOOR. Callers that need elevated
+# scopes (e.g. `id-token: write` for OIDC, `packages: write` for GHCR,
+# `pull-requests: write` for auto-comment) declare them at their own
+# `jobs.<id>.uses:` block; those will compose with the job-level
+# `contents: read` defined here.
+#
+# ─── Concurrency ────────────────────────────────────────────────────────
+# Concurrency is NOT set here. It belongs in the caller's ci.yml so the
+# group key (`${{ github.ref }}` / `${{ github.head_ref }}`) evaluates
+# in the caller's repo context. If concurrency were set here, every
+# caller would collide on one shared group across the org.
+#
+# ─── Node version + working directory ───────────────────────────────────
+# `node-version-file` is resolved relative to `working-directory`. So a
+# monorepo caller with `working-directory: apps/bb-mcp` and
+# `node-version-file: .nvmrc` reads `apps/bb-mcp/.nvmrc`. When
+# `node-version-file` is non-empty, it takes precedence over
+# `node-version` (the unused input is passed as empty string, which
+# `actions/setup-node` treats as "not provided").
+
 name: node-ci-reusable
 
 on:
@@ -19,13 +62,33 @@ on:
         type: string
         default: "node"
       run-on-macos:
-        description: "Also run on macos-latest. Only effective when lang == 'node' (shellcheck on macOS is unsupported here)."
+        description: "Also run on macos-latest. Only effective when lang == 'node' (shellcheck on macOS is unsupported here). ~10x ubuntu cost — only opt in if the repo has macOS-specific code paths or ships a macOS binary."
         type: boolean
         default: false
       node-version:
-        description: "Node.js version. Only used when lang == 'node'."
+        description: "Node.js version when lang == 'node'. Ignored when node-version-file is set."
         type: string
         default: "20"
+      node-version-file:
+        description: "Path (relative to working-directory) to a file containing the Node version (e.g. '.nvmrc', '.node-version', 'package.json'). When non-empty, takes precedence over node-version. Use this when the repo's Dockerfile / dev environment already reads .nvmrc — keeps one source of truth."
+        type: string
+        default: ""
+      working-directory:
+        description: "Path (relative to repo root) where package.json lives. Default '.' for single-app repos; set to e.g. 'apps/mcp' for monorepo workspaces. Applied to npm ci/build/test/lint, artifact upload path, and node-version-file resolution. Secret-scan still runs from repo root regardless."
+        type: string
+        default: "."
+      package-manager:
+        description: "Reserved. Only 'npm' is wired in v1.1; pnpm / yarn support lands when the monorepo (P3a) needs it."
+        type: string
+        default: "npm"
+      install-ignore-scripts:
+        description: "Pass --ignore-scripts to npm ci. Blocks dependency lifecycle hooks (preinstall, postinstall, prepare) from running during install — defense-in-depth against fork-PR RCE via a malicious dep's lifecycle script. Default false because some legitimate deps (esbuild, inngest-cli, protobufjs) use postinstall to download binaries or build native bindings. Opt in for repos whose deps don't depend on lifecycle hooks; revisit per-caller as the dep graph evolves."
+        type: boolean
+        default: false
+      timeout-minutes:
+        description: "Per-job timeout in minutes for build-test. Default 15 (well above current support-bot/kiosk runs of <5 min). Hard-capped at 30 — a malicious caller cannot wedge a runner for hours. secret-scan has its own short fixed timeout."
+        type: number
+        default: 15
       shellcheck-severity:
         description: "shellcheck --severity: error | warning | info | style. Default 'error' for safe rollout; tighten per-repo as scripts are cleaned up."
         type: string
@@ -33,7 +96,9 @@ on:
 
 jobs:
   build-test:
-    name: build & test (${{ matrix.os }})
+    name: build-test
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +107,10 @@ jobs:
         # macOS runner image doesn't ship shellcheck by default.
         os: ${{ fromJSON(inputs.lang == 'node' && inputs.run-on-macos && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
+    # Hard-cap caller-supplied timeout-minutes at 30. Default is 15 (set
+    # at the input level); the cap lives here so a caller can't ask for
+    # 360. Ternary returns capped value or 30.
+    timeout-minutes: ${{ inputs.timeout-minutes <= 30 && inputs.timeout-minutes || 30 }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -51,23 +120,37 @@ jobs:
         if: inputs.lang == 'node'
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: ${{ inputs.node-version }}
+          # node-version-file wins when set; otherwise node-version. Passing
+          # empty string for the unused input causes setup-node to treat
+          # it as not provided.
+          node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
+          node-version-file: ${{ inputs.node-version-file != '' && format('{0}/{1}', inputs.working-directory, inputs.node-version-file) || '' }}
           cache: npm
+          cache-dependency-path: ${{ format('{0}/package-lock.json', inputs.working-directory) }}
 
       - name: Install dependencies
         if: inputs.lang == 'node'
-        run: npm ci
+        working-directory: ${{ inputs.working-directory }}
+        # --ignore-scripts is opt-in per caller via install-ignore-scripts.
+        # Some repos (support-bot, anything pulling esbuild/inngest-cli/
+        # protobufjs) need postinstall to download binaries or build
+        # native bindings; those repos stay with the default. Repos
+        # whose dep graph is clean opt in for fork-PR RCE defense.
+        run: npm ci ${{ inputs.install-ignore-scripts && '--ignore-scripts' || '' }}
 
       - name: Build
         if: inputs.lang == 'node'
+        working-directory: ${{ inputs.working-directory }}
         run: npm run build
 
       - name: Test
         if: inputs.lang == 'node'
+        working-directory: ${{ inputs.working-directory }}
         run: npm test
 
       - name: Lint (optional)
         if: inputs.lang == 'node'
+        working-directory: ${{ inputs.working-directory }}
         run: npm run lint --if-present
 
       - name: Upload build artifact
@@ -75,10 +158,12 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
-          path: dist/
+          path: ${{ format('{0}/dist/', inputs.working-directory) }}
           if-no-files-found: ignore
 
       # ─── Shell path ────────────────────────────────────────────────────
+      # The shell path runs from repo root, not working-directory; a
+      # shell-only repo doesn't have the monorepo workspace concept.
       - name: Show shellcheck version
         if: inputs.lang == 'shell'
         run: shellcheck --version
@@ -89,8 +174,8 @@ jobs:
         run: |
           set -euo pipefail
           # `git ls-files` respects .gitignore + submodule boundaries
-          # automatically, avoiding the find-traversal-into-node_modules
-          # / vendored-deps trap and dropping the need for find -prune.
+          # automatically, avoiding find-traversal-into-node_modules /
+          # vendored-deps and dropping the need for find -prune.
           mapfile -t FILES < <(git ls-files '*.sh' | sort)
           if [ "${#FILES[@]}" -eq 0 ]; then
             echo "lang: shell requires at least one tracked *.sh file; none found."
@@ -101,8 +186,14 @@ jobs:
           shellcheck --severity="${{ inputs.shellcheck-severity }}" "${FILES[@]}"
 
   secret-scan:
-    name: secret scan (gitleaks)
+    name: secret-scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Short fixed timeout — gitleaks on a full-history clone of any
+    # laygroundwork repo lands in <2 min today. A hung scan should fail
+    # loud, not eat the build-test budget.
+    timeout-minutes: 10
     # We invoke the gitleaks OSS binary directly instead of using
     # gitleaks/gitleaks-action. The action v2+ requires a paid license
     # for any organization-owned repo (the OSS binary itself remains
@@ -141,4 +232,6 @@ jobs:
           gitleaks version
 
       - name: Run gitleaks
+        # Scans the full repo from root regardless of caller working-
+        # directory — secrets buried elsewhere in the repo still matter.
         run: gitleaks detect --source . --no-banner --redact --exit-code 1 --verbose

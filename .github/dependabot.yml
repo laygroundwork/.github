@@ -1,0 +1,34 @@
+# Dependabot config for laygroundwork/.github (GW-155).
+#
+# This repo holds the reusable workflows + shared org assets. It has no
+# npm/pip/go deps of its own, only pinned third-party GitHub Actions
+# (e.g. actions/checkout, actions/setup-node, actions/upload-artifact).
+# Keeping those SHA-pinned versions current is the whole point of this
+# file — Dependabot understands `# v6.0.2` trailing comments and opens
+# PRs that bump both the SHA and the comment in lockstep.
+#
+# The repo-root template at `../dependabot.yml` is the canonical config
+# every CALLER repo should copy in. This file (`.github/dependabot.yml`)
+# is dot-github's OWN config — separate from the template.
+#
+# Conventions:
+#   - Weekly Monday 09:00 ET, matching the template cadence.
+#   - github-actions only (no npm/pip in this repo).
+#   - Auto-merge gated on branch-protection (GW-156 / P2-1), NOT here.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

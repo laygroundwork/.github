@@ -42,7 +42,7 @@ on:
         default: true
     secrets:
       SLACK_ALERTS_WEBHOOK:
-        description: "Slack incoming-webhook URL for #bb-alerts. Caller passes via explicit `secrets: SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}` (NOT `secrets: inherit`)."
+        description: "Slack incoming-webhook URL for #bb-alerts. Caller passes via explicit pass-through in its `secrets:` block (NOT `secrets: inherit`). See dot-github/.github/workflows/smoke-v2.yml for example."
         required: false
 
 jobs:

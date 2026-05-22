@@ -1,0 +1,57 @@
+# Smoke caller for the GW-292 split reusables.
+#
+# Triggers on push to `smoke/*` branches in this repo (laygroundwork/.github).
+# Exercises all three reusables (node + shell + secret-scan) against a
+# minimal `smoke/` workspace before any real caller migrates. Gate the
+# `@node-ci-v2` / `@shell-ci-v1` / `@secret-scan-v1` tag promotion on a
+# green run of this workflow.
+#
+# Why a smoke caller in dot-github at all:
+# Each caller migration PR is a behavior change — node-ci-reusable.yml
+# moves from monolith-via-`@v1` to slimmed-via-`@node-ci-v2`. We want
+# the reusables themselves proven before the first real caller flips,
+# rather than discovering a bug in the slimmed file via a red PR on
+# beannbean-mcp.
+#
+# `@main` is OK here only because this is the smoke caller in the same
+# repo as the reusables — there's no cross-repo `@main` blast radius.
+# Real callers MUST pin to a tag.
+
+name: smoke-v2
+
+on:
+  push:
+    branches: [smoke/*]
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    uses: ./.github/workflows/node-ci-reusable.yml
+    with:
+      working-directory: "smoke"
+      node-version-file: ".nvmrc"
+      timeout-minutes: 5
+      notify-failures: false
+    secrets:
+      SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
+
+  shell-lint:
+    uses: ./.github/workflows/shell-ci-reusable.yml
+    with:
+      shellcheck-severity: "error"
+      timeout-minutes: 3
+      notify-failures: false
+    secrets:
+      SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
+
+  secret-scan:
+    uses: ./.github/workflows/secret-scan-reusable.yml
+    with:
+      timeout-minutes: 5
+      notify-failures: false
+    secrets:
+      SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}

@@ -1,0 +1,133 @@
+# Reusable CI workflow for laygroundwork repos — shellcheck path.
+#
+# ─── Charter ────────────────────────────────────────────────────────────
+# Single concern: shellcheck every tracked *.sh file in a repo. Companion
+# to `node-ci-reusable.yml` (build+test) and `secret-scan-reusable.yml`
+# (gitleaks). Created GW-292 (2026-05-22) split.
+#
+# ─── Versioning ─────────────────────────────────────────────────────────
+# Callers pin a tag (`@shell-ci-v1` or later), not `@main`. Per-reusable
+# tags so this can evolve independently of node-ci-v2 and secret-scan-v1.
+#
+# ─── Branch-protection contract ─────────────────────────────────────────
+# Job ID `build-test` matches the node reusable for required-check
+# uniformity. Display name: `ci / build-test (ubuntu-latest)`. Shell
+# repos don't matrix to macOS (macOS runner image doesn't ship
+# shellcheck by default; ubuntu does).
+#
+# ─── Permissions ────────────────────────────────────────────────────────
+# Job-level only. Workflow-level would cap callers.
+#
+# ─── Slack failure notify ───────────────────────────────────────────────
+# See sibling node-ci-reusable.yml for the design-review-driven harden:
+# fork-PR guard, URL allowlist, sanitized payload, no `|| true`,
+# stderr suppressed.
+
+name: shell-ci-reusable
+
+on:
+  workflow_call:
+    inputs:
+      shellcheck-severity:
+        description: "shellcheck --severity: error | warning | info | style. Default 'error' for safe rollout; tighten per-repo as scripts are cleaned up."
+        type: string
+        default: "error"
+      timeout-minutes:
+        description: "Per-job timeout. Default 5 (shellcheck on a typical laygroundwork repo finishes in <1 min). Hard-capped at 30."
+        type: number
+        default: 5
+      notify-failures:
+        description: "Post a failure notification to Slack via SLACK_ALERTS_WEBHOOK on red builds. Default true. Step is a graceful no-op when the secret is unset."
+        type: boolean
+        default: true
+    secrets:
+      SLACK_ALERTS_WEBHOOK:
+        description: "Slack incoming-webhook URL for #bb-alerts. Caller passes via explicit `secrets: SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}` (NOT `secrets: inherit`)."
+        required: false
+
+jobs:
+  build-test:
+    name: build-test
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes <= 30 && inputs.timeout-minutes || 30 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Show shellcheck version
+        run: shellcheck --version
+
+      - name: Run shellcheck on tracked *.sh files
+        shell: bash
+        env:
+          # Pass via env to avoid interpolating arbitrary caller-supplied
+          # strings directly into the shell command — defense against a
+          # caller (deliberately or accidentally) setting
+          # shellcheck-severity to a shell-injecting value. Allowlist
+          # validation below is the actual guard; env-indirection is
+          # belt-and-suspenders.
+          SHELLCHECK_SEVERITY: ${{ inputs.shellcheck-severity }}
+        run: |
+          set -euo pipefail
+          case "$SHELLCHECK_SEVERITY" in
+            error|warning|info|style) ;;
+            *)
+              echo "Invalid shellcheck-severity: '$SHELLCHECK_SEVERITY'. Expected one of: error, warning, info, style."
+              exit 2
+              ;;
+          esac
+          # `git ls-files` respects .gitignore + submodule boundaries
+          # automatically, avoiding find-traversal-into-node_modules /
+          # vendored-deps and dropping the need for find -prune.
+          mapfile -t FILES < <(git ls-files '*.sh' | sort)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "shell-ci-reusable requires at least one tracked *.sh file; none found."
+            exit 1
+          fi
+          echo "Linting ${#FILES[@]} file(s) with --severity=$SHELLCHECK_SEVERITY:"
+          printf '  %s\n' "${FILES[@]}"
+          shellcheck --severity="$SHELLCHECK_SEVERITY" "${FILES[@]}"
+
+      - name: Slack failure notify
+        if: ${{ failure() && !cancelled() && inputs.notify-failures }}
+        env:
+          SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_FORK_HEAD: ${{ github.event.pull_request.head.repo.full_name }}
+        shell: bash
+        run: |
+          set +x
+          set -eo pipefail
+
+          if [ "$GH_EVENT_NAME" = "pull_request" ] && [ -n "$GH_FORK_HEAD" ] && [ "$GH_FORK_HEAD" != "$GH_REPO" ]; then
+            echo "fork-PR detected; skip notify"
+            exit 0
+          fi
+          if [ -z "${SLACK_ALERTS_WEBHOOK:-}" ]; then
+            echo "SLACK_ALERTS_WEBHOOK unset; skip notify"
+            exit 0
+          fi
+          if ! [[ "$SLACK_ALERTS_WEBHOOK" =~ ^https://hooks\.slack\.com/services/[A-Z0-9/]+$ ]]; then
+            echo "SLACK_ALERTS_WEBHOOK fails URL allowlist; skip notify"
+            exit 0
+          fi
+
+          REPO_CLEAN=$(printf '%s' "$GH_REPO" | tr -cd 'a-zA-Z0-9/_.-')
+          SHA_SHORT=$(printf '%s' "$GH_SHA" | cut -c1-7)
+          PAYLOAD=$(jq -n \
+            --arg repo "$REPO_CLEAN" \
+            --arg sha "$SHA_SHORT" \
+            --arg url "$GH_RUN_URL" \
+            '{text: (":x: CI failure in `\($repo)` (commit `\($sha)`): \($url)")}')
+
+          curl --fail --silent --show-error --max-time 10 \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD" \
+            -o /dev/null \
+            "$SLACK_ALERTS_WEBHOOK" 2>/dev/null

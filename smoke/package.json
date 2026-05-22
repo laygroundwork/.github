@@ -1,0 +1,12 @@
+{
+  "name": "smoke",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal workspace consumed by .github/workflows/smoke-v2.yml. Exists only to give the split reusables something real to run npm ci/build/test against. Do not import from production code.",
+  "scripts": {
+    "build": "echo 'smoke build ok'",
+    "test": "node --test",
+    "lint": "echo 'smoke lint ok'"
+  }
+}

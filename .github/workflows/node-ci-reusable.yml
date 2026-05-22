@@ -1,78 +1,69 @@
-# Reusable CI workflow for laygroundwork repos.
+# Reusable CI workflow for laygroundwork repos — Node path.
 #
 # ─── Charter ────────────────────────────────────────────────────────────
-# One workflow, multiple langs, shared secret-scan. Inputs stay focused
-# on "how do we build + test + scan one repo / one workspace." When
-# input count exceeds ~8, or `if: inputs.lang == 'X'` appears in more
-# than 2 steps, split into `node-ci-reusable` + `shell-ci-reusable`
-# sharing a `secret-scan-reusable`.
+# One reusable, one concern: build + test a single Node workspace.
+# Companions: `shell-ci-reusable.yml` (shellcheck) + `secret-scan-reusable.yml`
+# (gitleaks). Callers compose them as two/three jobs.
 #
-# TRIPWIRE STATUS (as of v1.1): FIRED. 8 inputs and 6 `lang == 'node'`
-# steps + 2 `lang == 'shell'` steps (8 total `lang`-gated steps). The
-# split is tracked in https://linear.app/laygroundwork/issue/GW-292 —
-# do not let the file grow further without doing the split.
+# Split history: pre-v2 this file routed Node OR shell via `inputs.lang`
+# and bundled gitleaks as a second job. v2 (GW-292, 2026-05-22) split it
+# into three focused reusables after the charter tripwire fired at 8
+# inputs + 8 lang-gated steps. v1 callers still pin `@v1` and read the
+# monolith from that tag's commit; new callers move to `@node-ci-v2`.
 #
-# ─── Filename history ───────────────────────────────────────────────────
-# Filename `node-ci-reusable.yml` is a historical artifact (matches the
-# PLATFORM_PLAN.md §5 tree). The workflow now handles Node and
-# shell-only repos via the `lang` input.
+# Tripwire (re-watch): if input count exceeds ~8 or any `if:` expression
+# on a step gates more than 2 steps, split again before adding more.
 #
 # ─── Versioning ─────────────────────────────────────────────────────────
-# Callers MUST pin to a tag (e.g. `@v1`), not `@main`. `@main` is a
-# blast-radius footgun: a bad merge here instantly breaks every caller.
-# Tags are cut from main after CODEOWNERS-required review on this file.
+# Callers MUST pin to a tag (`@node-ci-v2` or later), not `@main`. `@main`
+# is a blast-radius footgun: a bad merge here instantly breaks every
+# caller. Tags are cut from main after CODEOWNERS-required review.
 #
 # ─── Branch-protection contract ─────────────────────────────────────────
-# Job IDs `build-test` and `secret-scan` are stable. GitHub Actions
-# appends the matrix value to the display name, so the names required
-# in branch protection are:
+# Job ID `build-test` is stable across the split. GitHub Actions appends
+# the matrix value, so the names required in branch protection are:
 #   - `ci / build-test (ubuntu-latest)`
 #   - `ci / build-test (macos-latest)`  (only when run-on-macos: true)
-#   - `ci / secret-scan`
 # Branch-protection rules require the *display name* (job ID + matrix
-# value), not the bare job ID. When you change EITHER the job IDs OR
-# the `name:` field on a job, update PLATFORM_PLAN.md §7 in the same
-# PR cycle — GW-156 P2-1's branch-protection apply script reads from
-# there.
+# value), not the bare job ID. Callers preserve `build-test` as the job
+# ID in their `jobs.<id>.uses:` block so the name is uniform across the
+# org. Companion `secret-scan-reusable.yml` preserves `secret-scan`.
+# See PLATFORM_PLAN.md §7 for the full required-check list.
 #
 # ─── Permissions ────────────────────────────────────────────────────────
-# Permissions are declared at JOB level (not workflow level). Workflow-
-# level permissions in a reusable become a CEILING for callers — moving
-# them down to job level keeps them a FLOOR. Callers that need elevated
-# scopes (e.g. `id-token: write` for OIDC, `packages: write` for GHCR,
-# `pull-requests: write` for auto-comment) declare them at their own
-# `jobs.<id>.uses:` block; those will compose with the job-level
-# `contents: read` defined here.
+# Job-level (not workflow-level). Workflow-level permissions in a
+# reusable become a CEILING for callers — at job level they're a FLOOR.
+# Callers that need elevated scopes (e.g. `id-token: write` for OIDC,
+# `packages: write` for GHCR) declare them at their own `jobs.<id>.uses:`
+# block; those compose with the `contents: read` defined here.
 #
 # ─── Concurrency ────────────────────────────────────────────────────────
 # Concurrency is NOT set here. It belongs in the caller's ci.yml so the
 # group key (`${{ github.ref }}` / `${{ github.head_ref }}`) evaluates
-# in the caller's repo context. If concurrency were set here, every
-# caller would collide on one shared group across the org.
+# in the caller's repo context.
 #
-# ─── Node version + working directory ───────────────────────────────────
-# `node-version-file` is resolved relative to `working-directory`. So a
-# monorepo caller with `working-directory: apps/bb-mcp` and
-# `node-version-file: .nvmrc` reads `apps/bb-mcp/.nvmrc`. When
-# `node-version-file` is non-empty, it takes precedence over
-# `node-version` (the unused input is passed as empty string, which
-# `actions/setup-node` treats as "not provided").
+# ─── Slack failure notify ───────────────────────────────────────────────
+# Failure-only Slack notify (GW-293). Hardened per gw292-reusable-split
+# design-review (2026-05-22):
+#   - Skips fork-PRs (belt-and-braces with GitHub's default secret-withhold).
+#   - Graceful no-op when SLACK_ALERTS_WEBHOOK secret unset.
+#   - Webhook URL regex-allowlisted before curl.
+#   - Repo/SHA sanitized before payload interpolation.
+#   - `curl --fail` (no `|| true`); stderr suppressed to prevent URL echo
+#     into logs (curl's error body can include the path).
+#   - `set +x` defensively so ACTIONS_STEP_DEBUG can't expand the secret.
 
 name: node-ci-reusable
 
 on:
   workflow_call:
     inputs:
-      lang:
-        description: "'node' (default) → npm build/test; 'shell' → shellcheck on tracked *.sh files. lang: shell requires at least one tracked .sh file or CI fails."
-        type: string
-        default: "node"
       run-on-macos:
-        description: "Also run on macos-latest. Only effective when lang == 'node' (shellcheck on macOS is unsupported here). ~10x ubuntu cost — only opt in if the repo has macOS-specific code paths or ships a macOS binary."
+        description: "Also run on macos-latest. ~10x ubuntu cost — only opt in if the repo has macOS-specific code paths or ships a macOS binary."
         type: boolean
         default: false
       node-version:
-        description: "Node.js version when lang == 'node'. Ignored when node-version-file is set."
+        description: "Node.js version. Ignored when node-version-file is set."
         type: string
         default: "20"
       node-version-file:
@@ -80,21 +71,25 @@ on:
         type: string
         default: ""
       working-directory:
-        description: "Path (relative to repo root) where package.json lives. Default '.' for single-app repos; set to e.g. 'apps/mcp' for monorepo workspaces. Applied to npm ci/build/test/lint, artifact upload path, and node-version-file resolution. Secret-scan still runs from repo root regardless."
+        description: "Path (relative to repo root) where package.json lives. Default '.' for single-app repos; set to e.g. 'apps/mcp' for monorepo workspaces. Applied to npm ci/build/test/lint, artifact upload path, and node-version-file resolution."
         type: string
         default: "."
       install-ignore-scripts:
-        description: "Pass --ignore-scripts to npm ci. Blocks dependency lifecycle hooks (preinstall, postinstall, prepare) from running during install — defense-in-depth against fork-PR RCE via a malicious dep's lifecycle script. Default false because some legitimate deps (esbuild, inngest-cli, protobufjs) use postinstall to download binaries or build native bindings. Opt in for repos whose deps don't depend on lifecycle hooks; revisit per-caller as the dep graph evolves."
+        description: "Pass --ignore-scripts to npm ci. Blocks dependency lifecycle hooks (preinstall, postinstall, prepare) — defense-in-depth against fork-PR RCE via a malicious dep's lifecycle script. Default false because some legitimate deps (esbuild, inngest-cli, protobufjs) use postinstall to download binaries or build native bindings. Opt in for repos whose deps don't depend on lifecycle hooks."
         type: boolean
         default: false
       timeout-minutes:
-        description: "Per-job timeout in minutes for build-test. Default 15 (well above current support-bot/kiosk runs of <5 min). Hard-capped at 30 — a malicious caller cannot wedge a runner for hours. secret-scan has its own short fixed timeout."
+        description: "Per-job timeout. Default 15 (well above current caller runs of <5 min). Hard-capped at 30 — a malicious caller cannot wedge a runner for hours."
         type: number
         default: 15
-      shellcheck-severity:
-        description: "shellcheck --severity: error | warning | info | style. Default 'error' for safe rollout; tighten per-repo as scripts are cleaned up."
-        type: string
-        default: "error"
+      notify-failures:
+        description: "Post a failure notification to Slack via SLACK_ALERTS_WEBHOOK on red builds. Default true. Set false to silence (e.g., during a known-flaky migration). Step is a graceful no-op when the secret is unset."
+        type: boolean
+        default: true
+    secrets:
+      SLACK_ALERTS_WEBHOOK:
+        description: "Slack incoming-webhook URL for #bb-alerts. Caller passes via explicit `secrets: SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}` (NOT `secrets: inherit`)."
+        required: false
 
 jobs:
   build-test:
@@ -104,154 +99,104 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS only when explicitly opted in AND lang is node. Shell-only
-        # repos run on ubuntu-latest where shellcheck is preinstalled; the
-        # macOS runner image doesn't ship shellcheck by default.
-        os: ${{ fromJSON(inputs.lang == 'node' && inputs.run-on-macos && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
+        os: ${{ fromJSON(inputs.run-on-macos && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     # Hard-cap caller-supplied timeout-minutes at 30. Default is 15 (set
     # at the input level); the cap lives here so a caller can't ask for
-    # 360. Edge case: timeout-minutes: 0 also returns 30 because 0 is
-    # falsy in GH Actions expressions and trips the `||` fallback. A
-    # caller asking for 0 has a config bug, not a use case, so silent
-    # promotion to 30 is acceptable.
+    # 360. timeout-minutes: 0 also returns 30 because 0 is falsy in GH
+    # Actions expressions and trips the `||` fallback.
     timeout-minutes: ${{ inputs.timeout-minutes <= 30 && inputs.timeout-minutes || 30 }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # ─── Node path ─────────────────────────────────────────────────────
       - name: Setup Node.js
-        if: inputs.lang == 'node'
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          # node-version-file wins when set; otherwise node-version. Passing
-          # empty string for the unused input causes setup-node to treat
-          # it as not provided.
+          # node-version-file wins when set; otherwise node-version.
+          # Passing empty string for the unused input causes setup-node
+          # to treat it as not provided.
           node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
           node-version-file: ${{ inputs.node-version-file != '' && format('{0}/{1}', inputs.working-directory, inputs.node-version-file) || '' }}
           cache: npm
           cache-dependency-path: ${{ format('{0}/package-lock.json', inputs.working-directory) }}
 
       - name: Install dependencies
-        if: inputs.lang == 'node'
         working-directory: ${{ inputs.working-directory }}
-        # --ignore-scripts is opt-in per caller via install-ignore-scripts.
-        # Some repos (support-bot, anything pulling esbuild/inngest-cli/
-        # protobufjs) need postinstall to download binaries or build
-        # native bindings; those repos stay with the default. Repos
-        # whose dep graph is clean opt in for fork-PR RCE defense.
         run: npm ci ${{ inputs.install-ignore-scripts && '--ignore-scripts' || '' }}
 
       - name: Build
-        if: inputs.lang == 'node'
         working-directory: ${{ inputs.working-directory }}
         run: npm run build
 
       - name: Test
-        if: inputs.lang == 'node'
         working-directory: ${{ inputs.working-directory }}
         run: npm test
 
       - name: Lint (optional)
-        if: inputs.lang == 'node'
         working-directory: ${{ inputs.working-directory }}
         run: npm run lint --if-present
 
       - name: Upload build artifact
-        if: inputs.lang == 'node' && matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: ${{ format('{0}/dist/', inputs.working-directory) }}
           if-no-files-found: ignore
 
-      # ─── Shell path ────────────────────────────────────────────────────
-      # The shell path runs from repo root, not working-directory; a
-      # shell-only repo doesn't have the monorepo workspace concept.
-      - name: Show shellcheck version
-        if: inputs.lang == 'shell'
-        run: shellcheck --version
-
-      - name: Run shellcheck on tracked *.sh files
-        if: inputs.lang == 'shell'
-        shell: bash
+      - name: Slack failure notify
+        if: ${{ failure() && !cancelled() && inputs.notify-failures }}
         env:
-          # Pass via env to avoid interpolating arbitrary caller-supplied
-          # strings directly into the shell command — defense against a
-          # caller (deliberately or accidentally) setting
-          # shellcheck-severity to a shell-injecting value. Allowlist
-          # validation below is the actual guard; env-indirection is
-          # belt-and-suspenders.
-          SHELLCHECK_SEVERITY: ${{ inputs.shellcheck-severity }}
-        run: |
-          set -euo pipefail
-          case "$SHELLCHECK_SEVERITY" in
-            error|warning|info|style) ;;
-            *)
-              echo "Invalid shellcheck-severity: '$SHELLCHECK_SEVERITY'. Expected one of: error, warning, info, style."
-              exit 2
-              ;;
-          esac
-          # `git ls-files` respects .gitignore + submodule boundaries
-          # automatically, avoiding find-traversal-into-node_modules /
-          # vendored-deps and dropping the need for find -prune.
-          mapfile -t FILES < <(git ls-files '*.sh' | sort)
-          if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "lang: shell requires at least one tracked *.sh file; none found."
-            exit 1
-          fi
-          echo "Linting ${#FILES[@]} file(s) with --severity=$SHELLCHECK_SEVERITY:"
-          printf '  %s\n' "${FILES[@]}"
-          shellcheck --severity="$SHELLCHECK_SEVERITY" "${FILES[@]}"
-
-  secret-scan:
-    name: secret-scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    # Short fixed timeout — gitleaks on a full-history clone of any
-    # laygroundwork repo lands in <2 min today. A hung scan should fail
-    # loud, not eat the build-test budget.
-    timeout-minutes: 10
-    # We invoke the gitleaks OSS binary directly instead of using
-    # gitleaks/gitleaks-action. The action v2+ requires a paid license
-    # for any organization-owned repo (the OSS binary itself remains
-    # free). Pinning the binary's release tag + verifying its sha256
-    # against the published checksums file gives us the same supply-
-    # chain guarantee as a SHA-pinned action, without the licensing
-    # entanglement. Bump GITLEAKS_VERSION / _SHA256 together when a new
-    # release is needed; the sha line lives at
-    # https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_checksums.txt
-    env:
-      GITLEAKS_VERSION: "8.30.1"
-      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-    steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - name: Install gitleaks binary (sha256-verified)
+          SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_FORK_HEAD: ${{ github.event.pull_request.head.repo.full_name }}
         shell: bash
         run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -fsSL --retry 3 -o gitleaks.tar.gz "$URL"
-          ACTUAL=$(sha256sum gitleaks.tar.gz | awk '{print $1}')
-          if [ "$ACTUAL" != "$GITLEAKS_SHA256" ]; then
-            echo "gitleaks tarball sha256 mismatch:"
-            echo "  expected: $GITLEAKS_SHA256"
-            echo "  actual:   $ACTUAL"
-            exit 1
-          fi
-          tar xzf gitleaks.tar.gz gitleaks
-          chmod +x gitleaks
-          sudo mv gitleaks /usr/local/bin/gitleaks
-          gitleaks version
+          set +x
+          set -eo pipefail
 
-      - name: Run gitleaks
-        # Scans the full repo from root regardless of caller working-
-        # directory — secrets buried elsewhere in the repo still matter.
-        run: gitleaks detect --source . --no-banner --redact --exit-code 1 --verbose
+          # Fork-PR guard. GitHub withholds secrets from fork PRs by default
+          # for `pull_request`, but `pull_request_target` would leak them.
+          # Belt-and-braces.
+          if [ "$GH_EVENT_NAME" = "pull_request" ] && [ -n "$GH_FORK_HEAD" ] && [ "$GH_FORK_HEAD" != "$GH_REPO" ]; then
+            echo "fork-PR detected; skip notify"
+            exit 0
+          fi
+
+          # Graceful no-op when the org hasn't configured the webhook yet.
+          if [ -z "${SLACK_ALERTS_WEBHOOK:-}" ]; then
+            echo "SLACK_ALERTS_WEBHOOK unset; skip notify"
+            exit 0
+          fi
+
+          # Allowlist webhook URL shape. Even though it comes from a secret
+          # today, belt-and-braces against future drift to per-caller or
+          # per-tenant config.
+          if ! [[ "$SLACK_ALERTS_WEBHOOK" =~ ^https://hooks\.slack\.com/services/[A-Z0-9/]+$ ]]; then
+            echo "SLACK_ALERTS_WEBHOOK fails URL allowlist; skip notify"
+            exit 0
+          fi
+
+          # Sanitize repo string (defense vs. attacker-chosen Slack markdown
+          # via fork branch names) before payload interpolation.
+          REPO_CLEAN=$(printf '%s' "$GH_REPO" | tr -cd 'a-zA-Z0-9/_.-')
+          SHA_SHORT=$(printf '%s' "$GH_SHA" | cut -c1-7)
+          PAYLOAD=$(jq -n \
+            --arg repo "$REPO_CLEAN" \
+            --arg sha "$SHA_SHORT" \
+            --arg url "$GH_RUN_URL" \
+            '{text: (":x: CI failure in `\($repo)` (commit `\($sha)`): \($url)")}')
+
+          # stderr suppressed: curl --fail's error body can include URL path.
+          # The URL is a registered secret so GH redacts the exact string,
+          # but belt-and-braces.
+          curl --fail --silent --show-error --max-time 10 \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD" \
+            -o /dev/null \
+            "$SLACK_ALERTS_WEBHOOK" 2>/dev/null

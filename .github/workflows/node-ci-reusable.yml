@@ -176,7 +176,7 @@ jobs:
           # Allowlist webhook URL shape. Even though it comes from a secret
           # today, belt-and-braces against future drift to per-caller or
           # per-tenant config.
-          if ! [[ "$SLACK_ALERTS_WEBHOOK" =~ ^https://hooks\.slack\.com/services/[A-Z0-9/]+$ ]]; then
+          if ! [[ "$SLACK_ALERTS_WEBHOOK" =~ ^https://hooks\.slack\.com/services/[A-Za-z0-9/]+$ ]]; then
             echo "SLACK_ALERTS_WEBHOOK fails URL allowlist; skip notify"
             exit 0
           fi

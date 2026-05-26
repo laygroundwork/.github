@@ -112,7 +112,7 @@ jobs:
             echo "SLACK_ALERTS_WEBHOOK unset; skip notify"
             exit 0
           fi
-          if ! [[ "$SLACK_ALERTS_WEBHOOK" =~ ^https://hooks\.slack\.com/services/[A-Z0-9/]+$ ]]; then
+          if ! [[ "$SLACK_ALERTS_WEBHOOK" =~ ^https://hooks\.slack\.com/services/[A-Za-z0-9/]+$ ]]; then
             echo "SLACK_ALERTS_WEBHOOK fails URL allowlist; skip notify"
             exit 0
           fi

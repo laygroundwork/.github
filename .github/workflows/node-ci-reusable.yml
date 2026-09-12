@@ -90,7 +90,7 @@ on:
         type: boolean
         default: true
       runner:
-        description: "Runner label for the Linux job. Default 'ubuntu-latest' (GitHub-hosted). To run on Namespace, callers pass the org-level CI_RUNNER Actions variable with an ubuntu-latest fallback (see smoke-v2.yml), so that one variable (e.g. 'namespace-profile-default') flips every caller at once and unsetting it rolls everything back to GitHub-hosted with no PR. The job display name is unchanged either way — branch protection keys on it."
+        description: "Runner label for the Linux job. Default 'ubuntu-latest' (GitHub-hosted). To run on Namespace, callers pass the org-level CI_RUNNER Actions variable with an ubuntu-latest fallback (see smoke-v2.yml), so that one variable (e.g. 'namespace-profile-groundwork-base') flips every caller at once and unsetting it rolls everything back to GitHub-hosted with no PR. The job display name is unchanged either way — branch protection keys on it."
         type: string
         default: "ubuntu-latest"
     secrets:

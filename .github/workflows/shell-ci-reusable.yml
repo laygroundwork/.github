@@ -40,6 +40,10 @@ on:
         description: "Post a failure notification to Slack via SLACK_ALERTS_WEBHOOK on red builds. Default true. Step is a graceful no-op when the secret is unset."
         type: boolean
         default: true
+      runner:
+        description: "Runner label for the Linux job. Default 'ubuntu-latest' (GitHub-hosted). To run on Namespace, callers pass the org-level CI_RUNNER Actions variable with an ubuntu-latest fallback (see smoke-v2.yml), so that one variable (e.g. 'namespace-profile-groundwork-base') flips every caller at once and unsetting it rolls everything back to GitHub-hosted with no PR. The job display name is unchanged either way — branch protection keys on it."
+        type: string
+        default: "ubuntu-latest"
     secrets:
       SLACK_ALERTS_WEBHOOK:
         description: "Slack incoming-webhook URL for #bb-alerts. Caller passes via explicit pass-through in its `secrets:` block (NOT `secrets: inherit`). See dot-github/.github/workflows/smoke-v2.yml for example."
@@ -50,7 +54,7 @@ jobs:
     name: build-test
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes <= 30 && inputs.timeout-minutes || 30 }}
     steps:
       - name: Checkout

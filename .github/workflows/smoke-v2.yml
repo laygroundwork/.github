@@ -36,6 +36,7 @@ jobs:
       node-version-file: ".nvmrc"
       timeout-minutes: 5
       notify-failures: false
+      runner: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     secrets:
       SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
 
@@ -45,6 +46,7 @@ jobs:
       shellcheck-severity: "error"
       timeout-minutes: 3
       notify-failures: false
+      runner: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     secrets:
       SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
 
@@ -53,5 +55,6 @@ jobs:
     with:
       timeout-minutes: 5
       notify-failures: false
+      runner: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     secrets:
       SLACK_ALERTS_WEBHOOK: ${{ secrets.SLACK_ALERTS_WEBHOOK }}

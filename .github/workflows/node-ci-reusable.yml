@@ -29,6 +29,9 @@
 # ID in their `jobs.<id>.uses:` block so the name is uniform across the
 # org. Companion `secret-scan-reusable.yml` preserves `secret-scan`.
 # See PLATFORM_PLAN.md §7 for the full required-check list.
+# The `(ubuntu-latest)` suffix is the matrix key, not the machine: since
+# node-ci-v3 the Linux leg runs on `inputs.runner` (Namespace when the org
+# CI_RUNNER variable is set) and the display name is deliberately unchanged.
 #
 # ─── Permissions ────────────────────────────────────────────────────────
 # Job-level (not workflow-level). Workflow-level permissions in a
@@ -86,6 +89,10 @@ on:
         description: "Post a failure notification to Slack via SLACK_ALERTS_WEBHOOK on red builds. Default true. Set false to silence (e.g., during a known-flaky migration). Step is a graceful no-op when the secret is unset."
         type: boolean
         default: true
+      runner:
+        description: "Runner label for the Linux job. Default 'ubuntu-latest' (GitHub-hosted). To run on Namespace, callers pass the org-level CI_RUNNER Actions variable with an ubuntu-latest fallback (see smoke-v2.yml), so that one variable (e.g. 'namespace-profile-groundwork-base') flips every caller at once and unsetting it rolls everything back to GitHub-hosted with no PR. The job display name is unchanged either way — branch protection keys on it."
+        type: string
+        default: "ubuntu-latest"
     secrets:
       SLACK_ALERTS_WEBHOOK:
         description: "Slack incoming-webhook URL for #bb-alerts. Caller passes via explicit pass-through in its `secrets:` block (NOT `secrets: inherit`). See dot-github/.github/workflows/smoke-v2.yml for example."
@@ -100,7 +107,12 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.run-on-macos && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
-    runs-on: ${{ matrix.os }}
+    # The Linux leg runs on `inputs.runner` (GitHub-hosted by default, a
+    # Namespace profile when the caller passes one); the macOS leg is
+    # GitHub-hosted regardless. `matrix.os` stays the OS FAMILY, not the
+    # machine, so the display name `build-test (ubuntu-latest)` — the
+    # branch-protection contract above — does not change when the runner does.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && (inputs.runner || 'ubuntu-latest') || matrix.os }}
     # Hard-cap caller-supplied timeout-minutes at 30. Default is 15 (set
     # at the input level); the cap lives here so a caller can't ask for
     # 360. timeout-minutes: 0 also returns 30 because 0 is falsy in GH
